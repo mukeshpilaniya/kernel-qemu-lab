@@ -1,0 +1,49 @@
+#!/bin/busybox sh
+# Crash-kernel init. The first kernel already linked the volume key and
+# kexec_file_load copied it into crash-reserved memory. Restore that key
+# and write /proc/vmcore onto the LUKS filesystem. Do not ask for a passphrase.
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export DM_DISABLE_UDEV=1
+
+fail() {
+	echo "LUKS_KDUMP_FAIL $*"
+	/bin/busybox dmesg | /bin/busybox tail -n 50
+	/bin/busybox poweroff -f
+	exit 1
+}
+
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+if [ ! -b /dev/vda ]; then
+	/bin/busybox mount -t devtmpfs devtmpfs /dev || fail "devtmpfs"
+fi
+/bin/busybox mkdir -p /dev/mapper /tmp /mnt /run /run/cryptsetup /sys/kernel/config
+echo "CRASH_CMDLINE=$(/bin/busybox cat /proc/cmdline)"
+/bin/busybox grep -q 'dmcryptkeys=' /proc/cmdline || fail "no dmcryptkeys= on crash cmdline"
+
+/bin/busybox mount -t configfs none /sys/kernel/config || fail "configfs mount"
+[ -e /sys/kernel/config/crash_dm_crypt_keys/restore ] || fail "restore attribute missing"
+echo yes > /sys/kernel/config/crash_dm_crypt_keys/restore || fail "key restore"
+echo "RESTORE=$(/bin/busybox cat /sys/kernel/config/crash_dm_crypt_keys/restore)"
+
+[ -b /dev/vdb ] || fail "no /dev/vdb in crash kernel"
+UUID=$(/sbin/cryptsetup luksUUID /dev/vdb) || fail "luksUUID"
+echo "LUKS_UUID=$UUID"
+
+# Restored keys are type "user", not "logon".
+/sbin/cryptsetup --batch-mode open --disable-external-tokens \
+	--volume-key-keyring "%user:cryptsetup:${UUID}" \
+	/dev/vdb kdump_luks || fail "cryptsetup open by volume key"
+
+/bin/busybox mount -t ext4 /dev/mapper/kdump_luks /mnt || fail "mount dump fs"
+/bin/busybox dd if=/proc/vmcore of=/mnt/vmcore bs=1048576 || fail "dd vmcore"
+/bin/busybox sync
+bytes=$(/bin/busybox wc -c < /mnt/vmcore)
+echo "VMCORE_BYTES=$bytes"
+/bin/busybox dd if=/mnt/vmcore of=/tmp/mag bs=4 count=1 2>/dev/null
+printf '\177ELF' > /tmp/elf
+/bin/busybox cmp /tmp/mag /tmp/elf || fail "vmcore is not ELF"
+[ "$bytes" -gt 1048576 ] || fail "vmcore smaller than 1MiB"
+echo LUKS_KDUMP_VMCORE_OK
+/bin/busybox sync
+/bin/busybox poweroff -f

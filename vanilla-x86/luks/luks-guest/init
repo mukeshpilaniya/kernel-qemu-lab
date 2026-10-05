@@ -1,0 +1,15 @@
+#!/bin/busybox sh
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export DM_DISABLE_UDEV=1
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+# The kernel already mounted devtmpfs. A tmpfs fallback here hides /dev/vdb.
+if [ ! -b /dev/vda ]; then
+	/bin/busybox mount -t devtmpfs devtmpfs /dev || /bin/busybox mount -t tmpfs tmpfs /dev
+fi
+/bin/busybox mkdir -p /dev/pts /dev/mapper /tmp /run /run/cryptsetup /sys/kernel/config /root
+/bin/busybox mount -t devpts devpts /dev/pts 2>/dev/null || true
+echo
+echo "vanilla x86_64 luks kdump guest  —  run sh /root/luks-kdump-test.sh"
+echo
+exec /bin/busybox sh
